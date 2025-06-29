@@ -1,66 +1,85 @@
-import instaloader
 import pandas as pd
 import requests
 import time
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-
-# Google Sheets
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-# Load environment variables from .env file
-load_dotenv()
-
-INSTAGRAM_IDS_FILE = os.getenv("INSTAGRAM_IDS_FILE", "insta_ids.txt")
-CSV_FILE = os.getenv("CSV_FILE", "insta_data.csv")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "InstagramData")
+import json
+from bs4 import BeautifulSoup
 
 def read_insta_ids(filename):
     with open(filename, "r") as f:
         return [line.strip() for line in f if line.strip()]
 
 def get_insta_data(username):
-    L = instaloader.Instaloader()
+    url = f"https://www.instagram.com/{username}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
     try:
-        profile = instaloader.Profile.from_username(L.context, username)
-        data = {
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"Failed to fetch {username}: HTTP {resp.status_code}")
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        scripts = soup.find_all("script", type="application/ld+json")
+        followers = None
+        name = username
+        if scripts:
+            data_json = json.loads(scripts[0].string)
+            name = data_json.get("name", username)
+            desc = data_json.get("description", "")
+            if desc:
+                import re
+                match = re.search(r"([\d,.]+) Followers", desc)
+                if match:
+                    followers = match.group(1).replace(",", "")
+        if not followers:
+            meta = soup.find("meta", property="og:description")
+            if meta:
+                desc = meta.get("content", "")
+                import re
+                match = re.search(r"([\d,.]+) Followers", desc)
+                if match:
+                    followers = match.group(1).replace(",", "")
+        user_data = {
             "username": username,
-            "full_name": profile.full_name,
-            "followers": profile.followers,
-            "following": profile.followees,
-            "posts": profile.mediacount,
-            "bio": profile.biography,
+            "name": name,
+            "followers": followers,
             "timestamp": datetime.now().isoformat()
         }
-        return data
+        return user_data
     except Exception as e:
         print(f"Error fetching {username}: {e}")
         return None
 
 def save_to_csv(data, filename):
+    # Load existing data if file exists, else create empty DataFrame
+    try:
+        old = pd.read_csv(filename)
+    except FileNotFoundError:
+        old = pd.DataFrame()
+    
     df = pd.DataFrame(data)
     if not df.empty:
-        try:
-            old = pd.read_csv(filename)
-            df = pd.concat([old, df], ignore_index=True)
-        except FileNotFoundError:
-            pass
-        df.to_csv(filename, index=False)
-
-def upload_to_gsheet(csv_file, sheet_name):
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(sheet_name).sheet1
-    with open(csv_file, 'r') as f:
-        content = f.read()
-    rows = [row.split(',') for row in content.split('\n') if row]
-    sheet.clear()
-    sheet.append_rows(rows)
+        # Ensure all columns are of type object (string) to avoid dtype issues
+        old = old.astype('object') if not old.empty else old
+        df = df.astype('object')
+        # If old is not empty, update rows by username, else just save new
+        if not old.empty and 'username' in old.columns:
+            old.set_index('username', inplace=True)
+            df.set_index('username', inplace=True)
+            # Update or insert new rows
+            old.update(df)
+            for idx in df.index:
+                if idx not in old.index:
+                    old.loc[idx] = df.loc[idx]
+            old.reset_index(inplace=True)
+            old.to_csv(filename, index=False)
+        else:
+            df.reset_index(inplace=True)
+            df.to_csv(filename, index=False)
 
 def send_telegram_message(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -68,28 +87,34 @@ def send_telegram_message(token, chat_id, message):
     requests.post(url, data=payload)
 
 def main():
+    load_dotenv()
+    INSTAGRAM_IDS_FILE = os.getenv("INSTAGRAM_IDS_FILE", "ids.txt")
+    CSV_FILE = os.getenv("CSV_FILE", "insta_data.csv")
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
     insta_ids = read_insta_ids(INSTAGRAM_IDS_FILE)
     all_data = []
+    messages = []
     for username in insta_ids:
         data = get_insta_data(username)
         if data:
             all_data.append(data)
+            msg = f"{data['name']} (@{data['username']}): {data['followers']} followers as of {data['timestamp']}"
+            messages.append(msg)
             print(f"Fetched data for {username}")
         time.sleep(2)  # Be polite to Instagram
 
     save_to_csv(all_data, CSV_FILE)
     print(f"Saved data to {CSV_FILE}")
 
-    # Optionally upload to Google Sheets
-    upload = input("Upload to Google Sheets? (y/n): ").strip().lower()
-    if upload == 'y':
-        upload_to_gsheet(CSV_FILE, GOOGLE_SHEET_NAME)
-        print("Uploaded to Google Sheets.")
-
-    # Optionally send Telegram message
-    send_msg = input("Send Telegram message? (y/n): ").strip().lower()
-    if send_msg == 'y':
-        send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, f"Instagram data updated at {datetime.now()}.")
+    # Send Telegram summary message
+    if messages and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        summary = "Instagram Follower Update:\n" + "\n".join(messages)
+        send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, summary)
+        print("Sent Telegram message.")
+    else:
+        print("Telegram message not sent (missing data or credentials).")
 
 if __name__ == "__main__":
     main()
