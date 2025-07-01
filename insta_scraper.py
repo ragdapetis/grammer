@@ -1,3 +1,4 @@
+import traceback
 import pandas as pd
 import requests
 import time
@@ -6,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import json
 from bs4 import BeautifulSoup
+import re
 
 def read_insta_ids(filename):
     with open(filename, "r") as f:
@@ -23,35 +25,33 @@ def get_insta_data(username):
             return None
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        scripts = soup.find_all("script", type="application/ld+json")
+        match = re.search(r'"follower_count"\s*:\s*(\d+)', resp.text)
         followers = None
-        name = username
-        if scripts:
-            data_json = json.loads(scripts[0].string)
-            name = data_json.get("name", username)
-            desc = data_json.get("description", "")
-            if desc:
-                import re
-                match = re.search(r"([\d,.]+) Followers", desc)
-                if match:
-                    followers = match.group(1).replace(",", "")
+        status = ''
+        if match:
+            followers = int(match.group(1))
+            status = 'Latest Data'
+
         if not followers:
             meta = soup.find("meta", property="og:description")
             if meta:
                 desc = meta.get("content", "")
-                import re
                 match = re.search(r"([\d,.]+) Followers", desc)
                 if match:
                     followers = match.group(1).replace(",", "")
+
+            status = 'Fallback Data'
+
         user_data = {
             "username": username,
-            "name": name,
+            "status": status,
             "followers": followers,
             "timestamp": datetime.now().isoformat()
         }
         return user_data
     except Exception as e:
         print(f"Error fetching {username}: {e}")
+        traceback.print_exc()
         return None
 
 def save_to_csv(data, filename):
@@ -100,7 +100,7 @@ def main():
         data = get_insta_data(username)
         if data:
             all_data.append(data)
-            msg = f"{data['name']} (@{data['username']}): {data['followers']} followers as of {data['timestamp']}"
+            msg = f"{data['status']} | (@{data['username']}): {data['followers']} followers as of {data['timestamp']}"
             messages.append(msg)
             print(f"Fetched data for {username}")
         time.sleep(2)  # Be polite to Instagram
