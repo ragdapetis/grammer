@@ -53,12 +53,13 @@ def get_profile_stats(page, username):
     page.goto(url)
     try:
         page.wait_for_selector('header section ul li', timeout=15000)
-        stats = page.query_selector_all('header section ul li span')
+        stats = page.query_selector_all('header section ul li')
         posts = stats[0].get_attribute('title') or stats[0].inner_text() if len(stats) > 0 else None
         followers = stats[1].get_attribute('title') or stats[1].inner_text() if len(stats) > 1 else None
         following = stats[2].get_attribute('title') or stats[2].inner_text() if len(stats) > 2 else None
         return posts, followers, following
     except Exception as e:
+        print(e)
         return None, None, None
 
 def main():
@@ -83,6 +84,13 @@ def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
         context = browser.new_context()
+        # Block images, videos, and other unnecessary resources
+        def block_junk(route):
+            if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"]:
+                route.abort()
+            else:
+                route.continue_()
+        context.route("**/*", block_junk)
         page = context.new_page()
         # Try to login using cookies first
         logged_in = False
@@ -112,9 +120,9 @@ def main():
             try:
                 posts, followers, following = get_profile_stats(page, username)
                 if followers is not None:
-                    msg = f"(@{username}): {followers} followers, {following} following, {posts} posts"
+                    msg = f"(@{username}): {followers}, {following}, {posts}"
                     messages.append(msg)
-                    print(f"Fetched data for {username}")
+                    print(f"Fetched data for {username} | {msg}")
                 else:
                     error_messages.append(f"Error fetching stats for {username}")
             except Exception as e:
